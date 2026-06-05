@@ -1,0 +1,24 @@
+# extension-updates.txt
+# Semi-automatic MediaWiki extension update list
+#
+# HOW TO USE:
+#   1. Run:  docker exec -it mediawiki-mediawiki-1 update-extensions.sh list
+#      to see all installed extensions.
+#
+#   2. For each extension, look up the download URL on mediawiki.org
+#      (see update-extensions.sh help for detailed instructions).
+#
+#   3. Add/update lines below in the format:
+#        ExtensionName   https://....tar.gz
+#
+#   4. Copy this file into the container and run:
+#        docker cp extension-updates.txt mediawiki-mediawiki-1:/tmp/updates.txt
+#        docker exec -it mediawiki-mediawiki-1 update-extensions.sh batch /tmp/updates.txt
+#
+# FORMAT: ExtensionName<TAB or spaces>URL
+# Lines starting with # are ignored. Empty lines are ignored.
+# -----------------------------------------------------------------------
+
+# Example entries — replace with real URLs from mediawiki.org:
+# AdminLinks    https://extdist.wmflabs.org/dist/extensions/AdminLinks-REL1_42-xxxxxxx.tar.gz
+# VisualEditor  https://extdist.wmflabs.org/dist/extensions/VisualEditor-REL1_42-xxxxxxx.tar.gz

@@ -1,0 +1,24 @@
+# Environment — contains secrets
+.env
+.env.local
+*.bak
+
+# Softaculous backup archives
+*.tar.gz
+*.zip
+
+# docker/LocalSettings.php — contains DB credentials
+# Keep .gitignore'd if this is a public repo; remove this line for private repos
+docker/LocalSettings.php
+
+# Extension update list may contain URLs with tokens
+docker/extension-updates.txt
+
+# Working directory created by import script
+.work/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
