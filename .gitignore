@@ -7,12 +7,14 @@
 *.tar.gz
 *.zip
 
-# docker/LocalSettings.php — contains DB credentials
+# docker/LocalSettings.php
+docker/LocalSettings.php.*.bak — contains DB credentials
 # Keep .gitignore'd if this is a public repo; remove this line for private repos
 docker/LocalSettings.php
 
 # Extension update list may contain URLs with tokens
 docker/extension-updates.txt
+docker/skin-updates.txt
 
 # Working directory created by import script
 .work/

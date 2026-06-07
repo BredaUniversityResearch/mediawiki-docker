@@ -46,7 +46,7 @@ env_get() { grep "^${1}=" "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '"' | t
 env_set() {
     local key="$1" val="$2"
     if grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
-        sed -i.bak "s|^${key}=.*|${key}=${val}|" "$ENV_FILE"
+        sed -i "s|^${key}=.*|${key}=${val}|" "$ENV_FILE"
     else
         echo "${key}=${val}" >> "$ENV_FILE"
     fi
@@ -93,15 +93,15 @@ mw_update() {
 
 # Reapply all Docker-specific settings to LocalSettings.php
 rewrite_local_settings() {
-    sed -i.bak \
+    sed -i \
         -e "s|^\(\$wgDBserver\s*=\s*\).*|\1\"db\";|" \
         -e "s|^\(\$wgDBname\s*=\s*\).*|\1\"${SRC_DB_NAME}\";|" \
         -e "s|^\(\$wgDBuser\s*=\s*\).*|\1\"${SRC_DB_USER}\";|" \
         -e "s|^\(\$wgDBpassword\s*=\s*\).*|\1\"${SRC_DB_PASS}\";|" \
         "$LOCAL_SETTINGS"
-    sed -i.bak "s|^\(\$wgServer\s*=\s*\).*|\1\"${WG_SERVER}\";|" "$LOCAL_SETTINGS"
+    sed -i "s|^\(\$wgServer\s*=\s*\).*|\1\"${WG_SERVER}\";|" "$LOCAL_SETTINGS"
     if grep -q "wgTmpDirectory" "$LOCAL_SETTINGS"; then
-        sed -i.bak 's|^\(\$wgTmpDirectory\s*=\s*\).*|\1"$IP/tmp";|' "$LOCAL_SETTINGS"
+        sed -i 's|^\(\$wgTmpDirectory\s*=\s*\).*|\1"$IP/tmp";|' "$LOCAL_SETTINGS"
     else
         echo '' >> "$LOCAL_SETTINGS"
         echo '$wgTmpDirectory = "$IP/tmp";' >> "$LOCAL_SETTINGS"
@@ -139,11 +139,14 @@ if [[ ! -f "$ENV_FILE" ]]; then
     fi
 fi
 
-# Ensure docker/extension-updates.txt exists as a file before docker compose up
-# (Docker creates it as a directory if missing at mount time)
+# Ensure docker/extension-updates.txt and skin-updates.txt exist as files
 if [[ ! -f "$PROJECT_DIR/docker/extension-updates.txt" ]]; then
     touch "$PROJECT_DIR/docker/extension-updates.txt"
     ok "Created docker/extension-updates.txt"
+fi
+if [[ ! -f "$PROJECT_DIR/docker/skin-updates.txt" ]]; then
+    touch "$PROJECT_DIR/docker/skin-updates.txt"
+    ok "Created docker/skin-updates.txt"
 fi
 
 cd "$PROJECT_DIR"
@@ -154,6 +157,51 @@ hr
 log "Backup  : $BACKUP_FILE"
 log "Project : $PROJECT_DIR"
 echo ""
+
+# =============================================================================
+# Pre-flight — Fresh import or upgrade?
+# =============================================================================
+echo "  What would you like to do?"
+echo "  1. Fresh import   (removes existing data and volumes)"
+echo "  2. Upgrade        (keeps existing data, upgrades MediaWiki version)"
+echo ""
+while true; do
+    read -r -p "  Your choice [1/2]: " import_mode
+    echo ""
+    if [[ "$import_mode" == "1" ]]; then
+        # Fresh import — clean up existing state
+        if [[ -f "$ENV_FILE" ]]; then
+            # Read project name before deleting .env
+            EXISTING_PROJECT=$(grep "^COMPOSE_PROJECT_NAME=" "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'")
+            if [[ -n "$EXISTING_PROJECT" ]]; then
+                log "Removing existing Docker stack '$EXISTING_PROJECT' and volumes..."
+                COMPOSE_CMD=$(docker compose version &>/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
+            COMPOSE_PROJECT_NAME="$EXISTING_PROJECT" $COMPOSE_CMD down -v 2>/dev/null || true
+                ok "Volumes removed."
+            fi
+            rm -f "$ENV_FILE"
+            ok "Removed .env"
+        fi
+        if [[ -f "$PROJECT_DIR/docker/extension-updates.txt" ]]; then
+            rm -f "$PROJECT_DIR/docker/extension-updates.txt"
+            touch "$PROJECT_DIR/docker/extension-updates.txt"
+            ok "Reset docker/extension-updates.txt"
+        fi
+        # Re-create .env from example
+        if [[ -f "$PROJECT_DIR/.env.example" ]]; then
+            cp "$PROJECT_DIR/.env.example" "$ENV_FILE"
+            ok ".env reset from .env.example"
+        else
+            touch "$ENV_FILE"
+        fi
+        break
+    elif [[ "$import_mode" == "2" ]]; then
+        break
+    else
+        warn "Invalid choice — please enter 1 or 2."
+        echo ""
+    fi
+done
 
 # =============================================================================
 # Step 1 — Read MediaWiki version from softver.txt, prompt user
@@ -364,9 +412,16 @@ fi
 
 if { tar -tzf "$BACKUP_FILE" 2>/dev/null || true; } | grep -q "^skins/"; then
     run_with_spinner "Extracting skins" tar -xzf "$BACKUP_FILE" -C "$WORK_DIR" skins/
-    run_with_spinner "Copying skins to container" docker cp "$(to_docker_path "$WORK_DIR")/skins/." "$MW_CONTAINER:/var/www/html/skins/"
+    log "Copying missing skins to container (skipping existing ones)..."
+    for skin_dir in "$WORK_DIR/skins/"/*/; do
+        skin_name=$(basename "$skin_dir")
+        if ! docker exec "$MW_CONTAINER" test -d "/var/www/html/skins/$skin_name" 2>/dev/null; then
+            docker cp "$(to_docker_path "$skin_dir")" "$MW_CONTAINER:/var/www/html/skins/$skin_name"
+            log "  Restored: $skin_name"
+        fi
+    done
     docker exec "$MW_CONTAINER" chown -R www-data:www-data /var/www/html/skins/
-    ok "skins/ restored."
+    ok "skins/ restored (existing skins preserved)."
 else
     warn "No skins/ in backup — skipping."
 fi
@@ -444,7 +499,7 @@ if [[ "$UPGRADING" == "yes" ]]; then
 
     # Disable all extensions and skins in LocalSettings.php before schema update
     log "Disabling extensions in LocalSettings.php for schema update..."
-    sed -i.bak 's/^\(\s*\)\(wfLoadExtension\|wfLoadSkin\)/\1\/\/\2/' "$LOCAL_SETTINGS"
+    sed -i 's/^\(\s*\)\(wfLoadExtension\|wfLoadSkin\)/\1\/\/\2/' "$LOCAL_SETTINGS"
     $COMPOSE restart mediawiki
 
     log "Running database schema update..."
@@ -458,13 +513,20 @@ if [[ "$UPGRADING" == "yes" ]]; then
     rewrite_local_settings
     ok "LocalSettings.php restored and updated."
 
-    # Restore extensions from backup so update-extensions.sh has version files to work with
+    # Restore extensions from backup — only copy extensions not already present
+    # (preserves core bundled extensions at their new version)
     if { tar -tzf "$BACKUP_FILE" 2>/dev/null || true; } | grep -q "^extensions/"; then
         run_with_spinner "Extracting extensions" tar -xzf "$BACKUP_FILE" -C "$WORK_DIR" extensions/
-        docker exec "$MW_CONTAINER" bash -c "rm -rf /var/www/html/extensions/* 2>/dev/null || true"
-        run_with_spinner "Copying extensions to container" docker cp "$(to_docker_path "$WORK_DIR")/extensions/." "$MW_CONTAINER:/var/www/html/extensions/"
+        log "Copying missing extensions to container (skipping existing ones)..."
+        for ext_dir in "$WORK_DIR/extensions/"/*/; do
+            ext_name=$(basename "$ext_dir")
+            if ! docker exec "$MW_CONTAINER" test -d "/var/www/html/extensions/$ext_name" 2>/dev/null; then
+                docker cp "$(to_docker_path "$ext_dir")" "$MW_CONTAINER:/var/www/html/extensions/$ext_name"
+                log "  Restored: $ext_name"
+            fi
+        done
         docker exec "$MW_CONTAINER" chown -R www-data:www-data /var/www/html/extensions/
-        ok "extensions/ restored from backup."
+        ok "extensions/ restored from backup (existing extensions preserved)."
     else
         warn "No extensions/ in backup — skipping."
     fi
@@ -472,11 +534,11 @@ if [[ "$UPGRADING" == "yes" ]]; then
     $COMPOSE restart mediawiki
 
     echo ""
-    read -r -p "  Update extensions now? [Y/n]: " update_ext
+    read -r -p "  Update extensions and skins now? [Y/n]: " update_ext
     echo ""
     if [[ "${update_ext,,}" != "n" ]]; then
         log "Running extension updater..."
-        if ! docker exec -it "$MW_CONTAINER" bash /var/www/html/update-extensions.sh; then
+        if ! docker exec -it "$MW_CONTAINER" bash /var/www/html/update-extensions-skins.sh; then
             echo ""
             warn "Extension update failed or was incomplete."
             echo "  To retry manually, run:"

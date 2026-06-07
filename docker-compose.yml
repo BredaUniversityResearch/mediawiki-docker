@@ -34,7 +34,8 @@ services:
       # LocalSettings.php — mount yours here after initial setup
       - ./docker/LocalSettings.php:/var/www/html/LocalSettings.php
       # The extension update script available inside the container
-      - ./docker/update-extensions.sh:/var/www/html/update-extensions.sh:ro
+      - ./docker/update-extensions-skins.sh:/var/www/html/update-extensions-skins.sh:ro
+      - ./docker/skin-updates.txt:/var/www/html/skin-updates.txt
       # Config and extension list accessible by the update script
       - ./.env:/var/www/html/.env:ro
       - ./docker/extension-updates.txt:/var/www/html/extension-updates.txt

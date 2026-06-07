@@ -16,7 +16,7 @@ mediawiki-docker/
     ├── LocalSettings.php           # Your wiki config (git-ignored)
     ├── extension-updates.txt       # Your extension URLs (git-ignored)
     ├── extension-updates.txt.example
-    └── update-extensions.sh        # Update installed extensions
+    └── update-extensions-skins.sh        # Update installed extensions
 ```
 
 ---
@@ -149,7 +149,7 @@ Extensions are updated from inside the container. The script scans the `extensio
 ### Run the updater
 
 ```bash
-docker exec -it <container> bash /var/www/html/update-extensions.sh
+docker exec -it <container> bash /var/www/html/update-extensions-skins.sh
 ```
 
 Where `<container>` is your container name, e.g. `mw_1_45_80-mediawiki-1`. Check with:
@@ -161,7 +161,7 @@ docker compose ps
 ### Re-ask all extensions (reset saved URLs)
 
 ```bash
-docker exec -it <container> bash /var/www/html/update-extensions.sh --reset
+docker exec -it <container> bash /var/www/html/update-extensions-skins.sh --reset
 ```
 
 ### How it works

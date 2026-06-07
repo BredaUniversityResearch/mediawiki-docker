@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
 # =============================================================================
-# update-extensions.sh
-# MediaWiki extension updater — run inside the container via docker exec
+# update-extensions-skins.sh
+# MediaWiki extension and skin updater — run inside the container via docker exec
 #
 # USAGE:
-#   update-extensions.sh           # Update all extensions
-#   update-extensions.sh --reset   # Re-ask all extensions (pre-fills saved URLs)
+#   update-extensions-skins.sh           # Update all extensions and skins
+#   update-extensions-skins.sh --reset   # Re-ask all (pre-fills saved URLs)
 # =============================================================================
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSIONS_DIR="${EXTENSIONS_DIR:-/var/www/html/extensions}"
+SKINS_DIR="${SKINS_DIR:-/var/www/html/skins}"
 LOCAL_SETTINGS="/var/www/html/LocalSettings.php"
 UPDATES_FILE="$SCRIPT_DIR/extension-updates.txt"
+SKINS_UPDATES_FILE="$SCRIPT_DIR/skin-updates.txt"
 UPDATES_EXAMPLE="$SCRIPT_DIR/extension-updates.txt.example"
 WORK_DIR="/tmp/ext-update-$$"
 
@@ -50,12 +52,26 @@ fetch_extension_url() {
         | grep -i "^refresh:" | grep -o 'https://[^ ]*' | tr -d '[:space:]' || true
 }
 
+fetch_skin_url() {
+    local skin_name="$1" rel_version="$2"
+    command -v curl &>/dev/null || { echo ""; return; }
+    curl -sI --max-time 5 \
+        "https://www.mediawiki.org/wiki/Special:SkinDistributor?extdistname=${skin_name}&extdistversion=${rel_version}" \
+        | grep -i "^refresh:" | grep -o 'https://[^ ]*' | tr -d '[:space:]' || true
+}
+
 # -----------------------------------------------------------------------------
 # Read saved URL for an extension from extension-updates.txt
 # -----------------------------------------------------------------------------
 saved_url() {
     local ext_name="$1"
     grep "^${ext_name}[[:space:]]" "$UPDATES_FILE" 2>/dev/null \
+        | awk '{print $2}' | head -1 || true
+}
+
+saved_skin_url() {
+    local skin_name="$1"
+    grep "^${skin_name}[[:space:]]" "$SKINS_UPDATES_FILE" 2>/dev/null \
         | awk '{print $2}' | head -1 || true
 }
 
@@ -76,15 +92,29 @@ save_url() {
     fi
 }
 
+save_skin_url() {
+    local skin_name="$1" url="$2"
+    if grep -q "^${skin_name}[[:space:]]" "$SKINS_UPDATES_FILE" 2>/dev/null; then
+        local tmp
+        tmp=$(mktemp)
+        grep -v "^${skin_name}[[:space:]]" "$SKINS_UPDATES_FILE" > "$tmp" || true
+        echo "${skin_name}    ${url}" >> "$tmp"
+        cat "$tmp" > "$SKINS_UPDATES_FILE"
+        rm -f "$tmp"
+    else
+        echo "${skin_name}    ${url}" >> "$SKINS_UPDATES_FILE"
+    fi
+}
+
 # -----------------------------------------------------------------------------
 # Disable an extension in LocalSettings.php
 # -----------------------------------------------------------------------------
 disable_in_local_settings() {
-    local ext_name="$1"
-    if grep -q "wfLoadExtension( '${ext_name}' )" "$LOCAL_SETTINGS" 2>/dev/null; then
+    local ext_name="$1" load_fn="${2:-wfLoadExtension}"
+    if grep -q "${load_fn}( '${ext_name}' )" "$LOCAL_SETTINGS" 2>/dev/null; then
         local tmp
         tmp=$(mktemp)
-        sed "s|^\(\s*\)wfLoadExtension( '${ext_name}' )|\1//wfLoadExtension( '${ext_name}' )|" "$LOCAL_SETTINGS" > "$tmp"
+        sed "s|^\(\s*\)${load_fn}( '${ext_name}' )|\1//${load_fn}( '${ext_name}' )|" "$LOCAL_SETTINGS" > "$tmp"
         cat "$tmp" > "$LOCAL_SETTINGS"
         rm -f "$tmp"
         ok "${ext_name} disabled in LocalSettings.php."
@@ -95,14 +125,14 @@ disable_in_local_settings() {
 # Install an extension from a URL (tar.gz or zip)
 # -----------------------------------------------------------------------------
 install_extension() {
-    local ext_name="$1" url="$2"
+    local ext_name="$1" url="$2" base_dir="${3:-$EXTENSIONS_DIR}"
     local archive_file target_dir top_entries top_count
 
     mkdir -p "$WORK_DIR"
     trap 'rm -rf "$WORK_DIR"' EXIT
 
     archive_file="$(basename "$url" | sed 's/?.*//')"
-    target_dir="$EXTENSIONS_DIR/$ext_name"
+    target_dir="$base_dir/$ext_name"
 
     log "Downloading $ext_name..."
     curl -fL --progress-bar -o "$WORK_DIR/$archive_file" "$url" \
@@ -142,15 +172,24 @@ install_extension() {
 prompt_and_install() {
     local ext_name="$1" default_url="${2:-}"
 
-    while true; do
-        if [[ -n "$default_url" ]]; then
-            printf "  Download URL [%s]: " "$default_url"
-            read -r url_input
-            url="${url_input:-$default_url}"
+    # If we have a default URL, try it automatically first
+    if [[ -n "$default_url" ]]; then
+        log "Downloading $ext_name from default URL..."
+        if install_extension "$ext_name" "$default_url"; then
+            save_url "$ext_name" "$default_url"
+            (( success++ )) || true
+            echo ""
+            return 0
         else
-            read -r -p "  Download URL (or - to skip): " url_input
-            url="$url_input"
+            warn "Default URL failed — please enter a URL manually."
+            echo ""
         fi
+    fi
+
+    # Fall back to manual prompt
+    while true; do
+        read -r -p "  Download URL (or - to skip): " url_input
+        url="$url_input"
         echo ""
 
         if [[ -z "$url" ]]; then
@@ -176,7 +215,57 @@ prompt_and_install() {
             return 0
         else
             warn "Download failed — please check the URL and try again."
-            default_url="$url"
+        fi
+    done
+}
+
+# Skin variant of prompt_and_install that uses SKINS_UPDATES_FILE
+prompt_and_install_skin() {
+    local ext_name="$1" default_url="${2:-}"
+
+    # If we have a default URL, try it automatically first
+    if [[ -n "$default_url" ]]; then
+        log "Downloading skin $ext_name from default URL..."
+        if install_extension "$ext_name" "$default_url" "$SKINS_DIR"; then
+            save_skin_url "$ext_name" "$default_url"
+            (( skin_success++ )) || true
+            echo ""
+            return 0
+        else
+            warn "Default URL failed — please enter a URL manually."
+            echo ""
+        fi
+    fi
+
+    # Fall back to manual prompt
+    while true; do
+        read -r -p "  Download URL (or - to skip): " url_input
+        url="$url_input"
+        echo ""
+
+        if [[ -z "$url" ]]; then
+            warn "No URL entered — please enter a URL or - to skip."
+            continue
+        fi
+
+        if [[ "$url" == "-" ]]; then
+            save_skin_url "$ext_name" "-"
+            log "$ext_name: marked as skip."
+            read -r -p "  Disable $ext_name in LocalSettings.php? [y/N]: " disable_ext
+            echo ""
+            [[ "${disable_ext,,}" == "y" ]] && disable_in_local_settings "$ext_name" "wfLoadSkin"
+            (( skin_skipped++ )) || true
+            return 0
+        fi
+
+        save_skin_url "$ext_name" "$url"
+
+        if install_extension "$ext_name" "$url" "$SKINS_DIR"; then
+            (( skin_success++ )) || true
+            echo ""
+            return 0
+        else
+            warn "Download failed — please check the URL and try again."
         fi
     done
 }
@@ -185,17 +274,12 @@ prompt_and_install() {
 # Main
 # =============================================================================
 hr
-echo -e "${BOLD}  MediaWiki Extension Updater${NC}"
+echo -e "${BOLD}  MediaWiki Extension & Skin Updater${NC}"
 hr
 echo ""
 
 [[ -d "$EXTENSIONS_DIR" ]] || die "Extensions directory not found: $EXTENSIONS_DIR"
 
-# Ensure updates file exists
-if [[ ! -f "$UPDATES_FILE" ]]; then
-    [[ -f "$UPDATES_EXAMPLE" ]] && cp "$UPDATES_EXAMPLE" "$UPDATES_FILE" || touch "$UPDATES_FILE"
-    log "Created $UPDATES_FILE"
-fi
 
 REL_VERSION=$(mw_rel_version)
 [[ -n "$REL_VERSION" ]] && log "MediaWiki version: $REL_VERSION" \
@@ -344,12 +428,146 @@ for ext_name in "${incompatible[@]}"; do
 done
 
 hr
-ok "Done: $success updated, $skipped skipped, $failed failed."
+ok "Extensions — Done: $success updated, $skipped skipped, $failed failed."
+echo ""
 
-# Run database schema update to apply any extension schema changes
-if [[ "$success" -gt 0 ]]; then
+# =============================================================================
+# Skins — same three-phase approach
+# =============================================================================
+[[ -d "$SKINS_DIR" ]] || { warn "Skins directory not found: $SKINS_DIR"; }
+
+if [[ -d "$SKINS_DIR" ]]; then
+    hr
+    echo -e "${BOLD}  Skins${NC}"
+    hr
     echo ""
-    log "Running database schema update for extension changes..."
+
+    all_skins=()
+    for skin_dir in "$SKINS_DIR"/*/; do
+        [[ -d "$skin_dir" ]] || continue
+        skin_name=$(basename "$skin_dir")
+        _saved=$(saved_skin_url "$skin_name")
+        if [[ "$_saved" == "-" ]] && [[ "$RESET" == false ]]; then
+            continue
+        fi
+        all_skins+=("$skin_name")
+    done
+
+    # Phase 1 — Skins without a version file
+    no_version_skins=()
+    for skin_name in "${all_skins[@]}"; do
+        [[ ! -f "$SKINS_DIR/$skin_name/version" ]] && no_version_skins+=("$skin_name")
+    done
+
+    if [[ "${#no_version_skins[@]}" -gt 0 ]]; then
+        echo -e "${BOLD}Phase 1 — Skins without a version file${NC}"
+        echo "  These will be skipped and not shown again."
+        echo ""
+        for skin_name in "${no_version_skins[@]}"; do
+            echo "    - $skin_name"
+            save_skin_url "$skin_name" "-"
+        done
+        echo ""
+    fi
+
+    # Build versioned skins list
+    versioned_skins=()
+    for skin_name in "${all_skins[@]}"; do
+        [[ -f "$SKINS_DIR/$skin_name/version" ]] && versioned_skins+=("$skin_name")
+    done
+
+    # Phase 2 — Compatibility check
+    incompatible_skins=()
+    compatible_skins=()
+
+    if [[ -n "$REL_VERSION" && "${#versioned_skins[@]}" -gt 0 ]]; then
+        echo -e "${BOLD}Phase 2 — Checking skin compatibility with $REL_VERSION...${NC}"
+        for skin_name in "${versioned_skins[@]}"; do
+            skin_version=$(head -1 "$SKINS_DIR/$skin_name/version" | tr -d '[:space:]' | cut -d: -f2)
+            if [[ "$skin_version" == "$REL_VERSION" ]] && [[ "$RESET" == false ]]; then
+                ok "$skin_name: already at $REL_VERSION — skipping"
+                continue
+            fi
+            log "Checking $skin_name..."
+            url=$(fetch_skin_url "$skin_name" "$REL_VERSION")
+            if [[ -z "$url" ]]; then
+                incompatible_skins+=("$skin_name")
+            else
+                compatible_skins+=("$skin_name:$url")
+            fi
+        done
+        echo ""
+
+        if [[ "${#incompatible_skins[@]}" -gt 0 ]]; then
+            warn "The following skins have no package for $REL_VERSION:"
+            echo ""
+            for skin_name in "${incompatible_skins[@]}"; do
+                echo "    - $skin_name"
+            done
+            echo ""
+            echo "  Make a choice:"
+            echo "  1. Disable them all in LocalSettings.php (skip next time)"
+            echo "  2. I will enter a custom URL for each in Phase 3"
+            echo ""
+            while true; do
+                read -r -p "  Your choice [1/2]: " incompat_choice
+                echo ""
+                if [[ "$incompat_choice" == "1" ]]; then
+                    for skin_name in "${incompatible_skins[@]}"; do
+                        disable_in_local_settings "$skin_name" "wfLoadSkin"
+                        save_skin_url "$skin_name" "-"
+                    done
+                    incompatible_skins=()
+                    break
+                elif [[ "$incompat_choice" == "2" ]]; then
+                    break
+                else
+                    warn "Invalid choice — please enter 1 or 2."
+                    echo ""
+                fi
+            done
+        fi
+    fi
+
+    # Phase 3 — Update skins
+    skin_success=0; skin_skipped=0; skin_failed=0
+
+    if [[ "${#compatible_skins[@]}" -gt 0 || "${#incompatible_skins[@]}" -gt 0 ]]; then
+        echo ""
+        echo -e "${BOLD}Phase 3 — Updating skins${NC}"
+        echo "  Type '-' to skip a skin and remember that choice."
+        echo ""
+    fi
+
+    for entry in "${compatible_skins[@]}"; do
+        skin_name="${entry%%:*}"
+        default_url="${entry#*:}"
+        skin_version=$(head -1 "$SKINS_DIR/$skin_name/version" | tr -d '[:space:]' | cut -d: -f2)
+        echo -e "${BOLD}--- $skin_name${NC} (current: $skin_version)"
+        _saved=$(saved_skin_url "$skin_name")
+        effective_default="$default_url"
+        if [[ "$RESET" == true && -n "$_saved" && "$_saved" != "-" ]]; then
+            echo "  New default URL: $default_url"
+            effective_default="$_saved"
+        fi
+        _SAVE_FILE="$SKINS_UPDATES_FILE" prompt_and_install_skin "$skin_name" "$effective_default"
+    done
+
+    for skin_name in "${incompatible_skins[@]}"; do
+        skin_version=$(head -1 "$SKINS_DIR/$skin_name/version" | tr -d '[:space:]' | cut -d: -f2)
+        echo -e "${BOLD}--- $skin_name${NC} (current: $skin_version)"
+        warn "No package found for $REL_VERSION — enter a custom URL or skip."
+        _SAVE_FILE="$SKINS_UPDATES_FILE" prompt_and_install_skin "$skin_name"
+    done
+
+    hr
+    ok "Skins — Done: $skin_success updated, $skin_skipped skipped, $skin_failed failed."
+fi
+
+# Run database schema update
+if [[ "$success" -gt 0 || "$skin_success" -gt 0 ]]; then
+    echo ""
+    log "Running database schema update for extension/skin changes..."
     if php maintenance/run.php update --quick 2>/dev/null || php maintenance/update.php --quick 2>/dev/null; then
         ok "Database schema updated."
     else
