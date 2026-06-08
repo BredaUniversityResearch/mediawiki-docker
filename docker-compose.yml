@@ -31,8 +31,9 @@ services:
       - mw_extensions:/var/www/html/extensions
       # Skins volume — custom skins restored from backup
       - mw_skins:/var/www/html/skins
+      # Tmp volume — required by MediaWiki ($wgTmpDirectory)
+      - mw_tmp:/var/www/html/tmp
       # LocalSettings.php — mount yours here after initial setup
-      - ./docker/LocalSettings.php:/var/www/html/LocalSettings.php
       # The extension update script available inside the container
       - ./docker/update-extensions-skins.sh:/var/www/html/update-extensions-skins.sh:ro
       - ./docker/skin-updates.txt:/var/www/html/skin-updates.txt
@@ -51,3 +52,4 @@ volumes:
   mw_images:
   mw_extensions:
   mw_skins:
+  mw_tmp:

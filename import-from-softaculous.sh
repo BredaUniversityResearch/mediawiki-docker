@@ -91,6 +91,13 @@ mw_update() {
     fi
 }
 
+# Copy LocalSettings.php into the container
+deploy_local_settings() {
+    docker cp "$(to_docker_path "$LOCAL_SETTINGS")" "$MW_CONTAINER:/var/www/html/LocalSettings.php"
+    docker exec "$MW_CONTAINER" chown www-data:www-data /var/www/html/LocalSettings.php
+    ok "LocalSettings.php deployed to container."
+}
+
 # Reapply all Docker-specific settings to LocalSettings.php
 rewrite_local_settings() {
     sed -i \
@@ -311,7 +318,7 @@ ok "Using HTTP port $HTTP_PORT → HTTP_PORT=$HTTP_PORT set in .env"
 DEFAULT_PROJECT="mw_$(echo "${MW_VERSION}" | tr "." "_")_${HTTP_PORT}"
 CURRENT_PROJECT=$(env_get "COMPOSE_PROJECT_NAME" || true)
 CURRENT_PROJECT="${CURRENT_PROJECT:-$DEFAULT_PROJECT}"
-echo "  Project name controls container/volume naming and allows multiple instances."
+echo "  Project name controls container/volume naming."
 read -r -p "  Project name [$CURRENT_PROJECT]: " PROJECT_INPUT
 echo ""
 COMPOSE_PROJECT_NAME="${PROJECT_INPUT:-$CURRENT_PROJECT}"
@@ -410,20 +417,22 @@ else
     warn "No images/ in backup — skipping."
 fi
 
-if { tar -tzf "$BACKUP_FILE" 2>/dev/null || true; } | grep -q "^skins/"; then
-    run_with_spinner "Extracting skins" tar -xzf "$BACKUP_FILE" -C "$WORK_DIR" skins/
-    log "Copying missing skins to container (skipping existing ones)..."
-    for skin_dir in "$WORK_DIR/skins/"/*/; do
-        skin_name=$(basename "$skin_dir")
-        if ! docker exec "$MW_CONTAINER" test -d "/var/www/html/skins/$skin_name" 2>/dev/null; then
-            docker cp "$(to_docker_path "$skin_dir")" "$MW_CONTAINER:/var/www/html/skins/$skin_name"
-            log "  Restored: $skin_name"
-        fi
-    done
-    docker exec "$MW_CONTAINER" chown -R www-data:www-data /var/www/html/skins/
-    ok "skins/ restored (existing skins preserved)."
-else
-    warn "No skins/ in backup — skipping."
+if [[ "$UPGRADING" == "no" ]]; then
+    if { tar -tzf "$BACKUP_FILE" 2>/dev/null || true; } | grep -q "^skins/"; then
+        run_with_spinner "Extracting skins" tar -xzf "$BACKUP_FILE" -C "$WORK_DIR" skins/
+        log "Copying missing skins to container (skipping existing ones)..."
+        for skin_dir in "$WORK_DIR/skins/"/*/; do
+            skin_name=$(basename "$skin_dir")
+            if ! docker exec "$MW_CONTAINER" test -d "/var/www/html/skins/$skin_name" 2>/dev/null; then
+                docker cp "$(to_docker_path "$skin_dir")" "$MW_CONTAINER:/var/www/html/skins/$skin_name"
+                log "  Restored: $skin_name"
+            fi
+        done
+        docker exec "$MW_CONTAINER" chown -R www-data:www-data /var/www/html/skins/
+        ok "skins/ restored (existing skins preserved)."
+    else
+        warn "No skins/ in backup — skipping."
+    fi
 fi
 
 if [[ "$UPGRADING" == "no" ]]; then
@@ -489,32 +498,31 @@ fi
 # Rewrite LocalSettings.php to point at Docker
 rewrite_local_settings
 
+if [[ "$UPGRADING" == "no" ]]; then
+    # Deploy LocalSettings.php and create tmp dir
+    deploy_local_settings
+fi
+
 # =============================================================================
 # Upgrade steps (only when a newer MW version was selected)
 # =============================================================================
 if [[ "$UPGRADING" == "yes" ]]; then
     log "Upgrade detected ($MW_BACKUP_VERSION → $MW_VERSION_FULL) — pulling new image..."
+
     $COMPOSE pull mediawiki
     $COMPOSE up -d mediawiki
+    log "Waiting for container to be ready..."
+    sleep 3
 
-    # Disable all extensions and skins in LocalSettings.php before schema update
-    log "Disabling extensions in LocalSettings.php for schema update..."
-    sed -i 's/^\(\s*\)\(wfLoadExtension\|wfLoadSkin\)/\1\/\/\2/' "$LOCAL_SETTINGS"
-    $COMPOSE restart mediawiki
-
-    log "Running database schema update..."
-    mw_update
-    ok "Database schema updated."
-
-    # Restore original LocalSettings.php from backup and reapply Docker settings
+    # Restore LocalSettings.php from backup and reapply Docker settings
     log "Restoring LocalSettings.php from backup..."
     run_with_spinner "Extracting LocalSettings.php" tar -xzf "$BACKUP_FILE" -C "$WORK_DIR" LocalSettings.php
     cp "$WORK_DIR/LocalSettings.php" "$LOCAL_SETTINGS"
     rewrite_local_settings
     ok "LocalSettings.php restored and updated."
+    deploy_local_settings
 
-    # Restore extensions from backup — only copy extensions not already present
-    # (preserves core bundled extensions at their new version)
+    # Restore missing extensions from backup
     if { tar -tzf "$BACKUP_FILE" 2>/dev/null || true; } | grep -q "^extensions/"; then
         run_with_spinner "Extracting extensions" tar -xzf "$BACKUP_FILE" -C "$WORK_DIR" extensions/
         log "Copying missing extensions to container (skipping existing ones)..."
@@ -531,28 +539,38 @@ if [[ "$UPGRADING" == "yes" ]]; then
         warn "No extensions/ in backup — skipping."
     fi
 
+    # Restore missing skins from backup
+    if { tar -tzf "$BACKUP_FILE" 2>/dev/null || true; } | grep -q "^skins/"; then
+        [[ ! -d "$WORK_DIR/skins" ]] && tar -xzf "$BACKUP_FILE" -C "$WORK_DIR" skins/
+        log "Copying missing skins to container (skipping existing ones)..."
+        for skin_dir in "$WORK_DIR/skins/"/*/; do
+            skin_name=$(basename "$skin_dir")
+            if ! docker exec "$MW_CONTAINER" test -d "/var/www/html/skins/$skin_name" 2>/dev/null; then
+                docker cp "$(to_docker_path "$skin_dir")" "$MW_CONTAINER:/var/www/html/skins/$skin_name"
+                log "  Restored: $skin_name"
+            fi
+        done
+        docker exec "$MW_CONTAINER" chown -R www-data:www-data /var/www/html/skins/
+        ok "skins/ restored (existing skins preserved)."
+    fi
+
     $COMPOSE restart mediawiki
 
-    echo ""
-    read -r -p "  Update extensions and skins now? [Y/n]: " update_ext
-    echo ""
-    if [[ "${update_ext,,}" != "n" ]]; then
-        log "Running extension updater..."
-        if ! docker exec -it "$MW_CONTAINER" bash /var/www/html/update-extensions-skins.sh; then
-            echo ""
-            warn "Extension update failed or was incomplete."
-            echo "  To retry manually, run:"
-            echo "    docker exec -it $MW_CONTAINER bash /var/www/html/update-extensions.sh"
-            echo "  Or to reset and re-ask all extensions:"
-            echo "    docker exec -it $MW_CONTAINER bash /var/www/html/update-extensions.sh --reset"
-            echo ""
-        fi
-    else
-        log "Skipping extension update."
-        echo "  To run it later:"
-        echo "    docker exec -it $MW_CONTAINER bash /var/www/html/update-extensions.sh"
+    log "Running extension and skin updater..."
+    if ! docker exec -it "$MW_CONTAINER" bash /var/www/html/update-extensions-skins.sh; then
+        echo ""
+        warn "Extension/skin update failed or was incomplete."
+        echo "  To retry manually, run:"
+        echo "    docker exec -it $MW_CONTAINER bash /var/www/html/update-extensions-skins.sh"
+        echo "  Or to reset and re-ask all:"
+        echo "    docker exec -it $MW_CONTAINER bash /var/www/html/update-extensions-skins.sh --reset"
         echo ""
     fi
+
+    # Run maintenance update to apply all schema changes
+    log "Running final database schema update..."
+    mw_update
+    ok "Database schema updated."
 
     # Offer to create a backup and do another upgrade
     echo ""

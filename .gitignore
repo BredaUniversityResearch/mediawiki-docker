@@ -24,3 +24,5 @@ docker/skin-updates.txt
 Thumbs.db
 .idea/
 .vscode/
+
+.work-backup/
