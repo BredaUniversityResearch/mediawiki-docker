@@ -19,6 +19,7 @@ services:
   mediawiki:
     image: mediawiki:${MEDIAWIKI_VERSION:-1.42}
     restart: unless-stopped
+    entrypoint: ["/bin/bash", "-c", "chown www-data:www-data /var/www/html/tmp && chmod 755 /var/www/html/tmp && touch /var/www/html/tmp/mw-GlobalIdGenerator33-UUID-128 /var/www/html/tmp/mw-GlobalIdGenerator33-UID-88 /var/www/html/tmp/mw-GlobalIdGenerator33-UID-128 /var/www/html/tmp/mw-GlobalIdGenerator33-UID-nodeid && chown www-data:www-data /var/www/html/tmp/mw-GlobalIdGenerator33-* && exec apache2-foreground"]
     depends_on:
       db:
         condition: service_healthy
