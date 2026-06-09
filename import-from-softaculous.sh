@@ -572,12 +572,12 @@ if [[ "$UPGRADING" == "yes" ]]; then
     mw_update
     ok "Database schema updated."
 
-    # Offer to create a backup and do another upgrade
+    # Offer to upgrade to another version
     echo ""
-    read -r -p "  Create a backup and upgrade to another version? [y/N]: " do_next
+    read -r -p "  Upgrade to another version? [y/N]: " do_upgrade
     echo ""
-    if [[ "${do_next,,}" == "y" ]]; then
-        log "Creating backup of current state..."
+    if [[ "${do_upgrade,,}" == "y" ]]; then
+        log "Creating backup of current state before upgrade..."
         NEXT_BACKUP="$PROJECT_DIR/mw-backup-${MW_VERSION}-$(date +%Y-%m-%d_%H-%M-%S).tar.gz"
         if ! bash "$PROJECT_DIR/backup-mediawiki.sh" "$NEXT_BACKUP"; then
             echo ""
@@ -589,6 +589,19 @@ if [[ "$UPGRADING" == "yes" ]]; then
             ok "Backup created: $NEXT_BACKUP"
             log "Starting next upgrade..."
             bash "$PROJECT_DIR/import-from-softaculous.sh" "$NEXT_BACKUP"
+        fi
+    else
+        read -r -p "  Create a backup? [Y/n]: " do_backup
+        echo ""
+        if [[ "${do_backup,,}" != "n" ]]; then
+            NEXT_BACKUP="$PROJECT_DIR/mw-backup-${MW_VERSION}-$(date +%Y-%m-%d_%H-%M-%S).tar.gz"
+            if ! bash "$PROJECT_DIR/backup-mediawiki.sh" "$NEXT_BACKUP"; then
+                warn "Backup failed."
+                echo "  To retry manually, run:"
+                echo "    bash $PROJECT_DIR/backup-mediawiki.sh"
+            else
+                ok "Backup created: $NEXT_BACKUP"
+            fi
         fi
     fi
 fi
